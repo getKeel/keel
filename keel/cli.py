@@ -13,6 +13,10 @@ def cli():
     """keel: a CLI tool that wraps coding agents via git hooks to inject architectural memory."""
     pass
 
+def echo_brand(msg, bold=False):
+    click.secho("keel", fg="cyan", bold=True, nl=False)
+    click.echo(f" | {msg}")
+
 @cli.command()
 def init():
     """Initialize keel in the current git repository."""
@@ -24,9 +28,9 @@ def init():
         db_path = keel_dir / 'memory.db'
         from .db import init_db
         init_db(str(db_path))
-        click.echo("keel initialized successfully. Hooks installed.")
+        echo_brand("Initialized successfully. Hooks installed.")
     except Exception as e:
-        click.echo(f"Error: {e}", err=True)
+        click.secho(f"Error: {e}", fg="red", err=True)
         raise click.Abort()
 
 @cli.command()
@@ -40,24 +44,25 @@ def config(api_key, openai_key, openrouter_key, gemini_key, groq_key, model):
     """Set keel configuration."""
     if api_key:
         set_config('api_key', api_key)
-        click.echo("Anthropic key saved.")
+        echo_brand("Anthropic key saved.")
     if openai_key:
         set_config('openai_key', openai_key)
-        click.echo("OpenAI key saved.")
+        echo_brand("OpenAI key saved.")
     if openrouter_key:
         set_config('openrouter_key', openrouter_key)
-        click.echo("OpenRouter key saved.")
+        echo_brand("OpenRouter key saved.")
     if gemini_key:
         set_config('gemini_key', gemini_key)
-        click.echo("Gemini key saved.")
+        echo_brand("Gemini key saved.")
     if groq_key:
         set_config('groq_key', groq_key)
-        click.echo("Groq key saved.")
+        echo_brand("Groq key saved.")
     if model:
         set_config('model', model)
-        click.echo(f"Model set to {model}.")
+        echo_brand(f"Model set to {click.style(model, fg='blue', bold=True)}.")
     if not any([api_key, openai_key, openrouter_key, gemini_key, groq_key, model]):
-        click.echo("Usage: keel config --api-key ... --openai-key ... --model ...")
+        click.secho("Usage: ", nl=False, fg="yellow")
+        click.echo("keel config --api-key ... --openai-key ... --model ...")
 
 @cli.command(context_settings={"ignore_unknown_options": True})
 @click.argument('cmd', nargs=-1, type=click.UNPROCESSED)
@@ -185,58 +190,66 @@ def review():
     keel_dir = Path('.keel')
     db_path = keel_dir / 'memory.db'
     if not db_path.exists():
-        click.echo("keel is not initialized. Run `keel init`.")
+        click.secho("keel is not initialized. Run `keel init`.", fg="red")
         return
 
     db_str = str(db_path)
     flagged = get_flagged_decisions(db_str)
     
     if not flagged:
-        click.echo("No conflicts to review.")
+        echo_brand("No conflicts to review.", bold=True)
         return
 
     for d in flagged:
-        click.echo("\n! CONFLICT DETECTED")
-        click.echo(f"Module: {d['module']}")
+        click.echo("")
+        click.secho("! CONFLICT DETECTED", fg="red", bold=True, bg="black")
+        click.secho(f"Module: ", fg="cyan", nl=False)
+        click.secho(d['module'], fg="blue", bold=True)
+        
         commit_ref = d.get('last_seen_commit') or "unknown commit"
-        click.echo(f"New:      \"{d['decision']}\" (from commit {commit_ref[:7]})")
+        click.secho(f"New:      ", fg="cyan", nl=False)
+        click.secho(f"\"{d['decision']}\"", fg="white", bold=True, nl=False)
+        click.secho(f" (from commit {commit_ref[:7]})", fg="cyan", dim=True)
         
         active = get_active_decisions_by_module(db_str, d['module'])
         old_id = None
+        click.secho(f"Existing: ", fg="cyan", nl=False)
         if active:
             old = active[0]
             old_id = old['id']
-            click.echo(f"Existing: \"{old['decision']}\" ({old['confidence']} confidence, x{old['reinforcement_count']})")
+            click.secho(f"\"{old['decision']}\"", fg="white", nl=False)
+            click.secho(f" ({old['confidence']} confidence, x{old['reinforcement_count']})", fg="cyan", dim=True)
         else:
-            click.echo("Existing: (none)")
+            click.secho("(none)", fg="white")
 
-        click.echo("\n[a] Accept new decision (archive old)")
-        click.echo("[r] Reject new decision (keep old, discard this finding)")
-        click.echo("[e] Edit decision manually")
-        click.echo("[s] Skip for now")
+        click.echo("")
+        click.secho("[a] ", fg="green", bold=True, nl=False); click.echo("Accept new decision (archive old)")
+        click.secho("[r] ", fg="red", bold=True, nl=False); click.echo("Reject new decision (keep old, discard this finding)")
+        click.secho("[e] ", fg="yellow", bold=True, nl=False); click.echo("Edit decision manually")
+        click.secho("[s] ", fg="blue", bold=True, nl=False); click.echo("Skip for now")
         
         while True:
             choice = click.prompt("Choice", type=click.Choice(['a', 'r', 'e', 's']), show_choices=False).lower()
             if choice == 's':
-                click.echo("Skipped.")
+                click.secho("Skipped.", fg="cyan", dim=True)
                 break
             elif choice == 'a':
                 resolve_decision(db_str, d['id'], 'accept', old_id=old_id)
-                click.echo("Accepted new decision.")
+                click.secho("Accepted new decision.", fg="green", bold=True)
                 break
             elif choice == 'r':
                 resolve_decision(db_str, d['id'], 'reject')
-                click.echo("Rejected new decision.")
+                click.secho("Rejected new decision.", fg="red", bold=True)
                 break
             elif choice == 'e':
                 new_text = click.edit(d['decision'])
                 if new_text is not None:
                     new_text = new_text.strip()
                     resolve_decision(db_str, d['id'], 'edit', old_id=old_id, new_text=new_text)
-                    click.echo("Saved edited decision.")
+                    click.secho("Saved edited decision.", fg="yellow", bold=True)
                     break
                 else:
-                    click.echo("Edit cancelled. Please choose an option.")
+                    click.secho("Edit cancelled. Please choose an option.", fg="red")
 
 @cli.command()
 def status():
@@ -244,7 +257,7 @@ def status():
     keel_dir = Path('.keel')
     db_path = keel_dir / 'memory.db'
     if not db_path.exists():
-        click.echo("keel is not initialized. Run `keel init`.")
+        click.secho("keel is not initialized. Run `keel init`.", fg="red")
         return
 
     conn = sqlite3.connect(str(db_path))
@@ -258,33 +271,42 @@ def status():
     active = [d for d in all_decisions if d['flagged'] == 0]
     flagged = [d for d in all_decisions if d['flagged'] == 1]
 
-    click.echo("-" * 35)
-    click.echo(f"DECISIONS ({len(active)} total, {len(flagged)} flagged)\n")
+    click.secho("-" * 45, fg="cyan", dim=True)
+    click.secho(f"DECISIONS ", fg="cyan", bold=True, nl=False)
+    click.echo(f"({len(active)} total, {len(flagged)} flagged)\n")
 
     # Sort active by count desc
     active.sort(key=lambda x: x['reinforcement_count'], reverse=True)
     
     for d in active:
-        mod = d['module'].ljust(14)
-        dec = d['decision'].ljust(30)
-        conf = d['confidence'].ljust(7)
-        count = f"x{d['reinforcement_count']}"
+        mod = click.style(d['module'].ljust(14), fg="blue")
+        dec = click.style(d['decision'].ljust(30), fg="white")
+        
+        conf_color = "green" if d['confidence'] == 'HIGH' else ("yellow" if d['confidence'] == 'MEDIUM' else "red")
+        conf = click.style(d['confidence'].ljust(7), fg=conf_color)
+        
+        count = click.style(f"x{d['reinforcement_count']}", fg="cyan", dim=True)
         click.echo(f"  {mod} {dec} {conf} {count}")
 
     if flagged:
-        click.echo(f"\n! NEEDS REVIEW ({len(flagged)})")
+        click.echo("")
+        click.secho(f"! NEEDS REVIEW ({len(flagged)})", fg="yellow", bold=True)
         for d in flagged:
-            mod = d['module'].ljust(14)
-            # Find conflicting active decision for the same module to show if possible
+            mod = click.style(d['module'].ljust(14), fg="blue")
             conflicts = [a for a in active if a['module'] == d['module']]
+            
             conflict_text = ""
             if conflicts:
-                conflict_text = f" [CONTRADICTS: {conflicts[0]['decision']}]"
+                conflict_text = click.style(f" [CONTRADICTS: {conflicts[0]['decision']}]", fg="red", dim=True)
             
-            dec = f"{d['decision']}{conflict_text}".ljust(40)
-            conf = d['confidence']
-            click.echo(f"  {mod} {dec} {conf}")
-        click.echo("  -> run `keel review` to resolve")
+            dec = f"{d['decision']}{conflict_text}"
+            
+            # Formatting padding accounting for color codes is annoying, so we pad manually
+            # or just let it flow since it's an error state
+            conf = click.style(d['confidence'], fg="red")
+            click.echo(f"  {mod} {dec}  {conf}")
+        
+        click.secho("  -> run `keel review` to resolve", fg="yellow", dim=True)
     
-    click.echo("-" * 35)
+    click.secho("-" * 45, fg="cyan", dim=True)
 
