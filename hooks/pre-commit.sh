@@ -1,2 +1,2 @@
 #!/bin/sh
-echo "keel: pre-commit fired"
+keel prepare-injection >> .keel/errors.log 2>&1 || true
