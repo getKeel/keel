@@ -36,5 +36,8 @@ def uninstall_hooks():
     git_hooks_dir = git_dir / 'hooks'
     for hook in ['post-commit', 'pre-commit']:
         dest = git_hooks_dir / hook
-        if dest.exists() and "klyd" in dest.read_text():
-            dest.unlink()
+        if dest.exists():
+            # Read as bytes to avoid UnicodeDecodeError on binary files
+            content = dest.read_bytes()
+            if b"klyd" in content:
+                dest.unlink()

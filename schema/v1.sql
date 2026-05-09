@@ -9,5 +9,6 @@ CREATE TABLE decisions (
     last_seen_commit TEXT,
     created_at TEXT DEFAULT (datetime('now')),
     flagged INTEGER DEFAULT 0,        -- 1 = needs human review
-    archived INTEGER DEFAULT 0        -- 1 = soft-deleted
+    archived INTEGER DEFAULT 0,        -- 1 = soft-deleted
+    UNIQUE(decision, module)
 );

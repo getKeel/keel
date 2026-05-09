@@ -166,7 +166,10 @@ def extract_commit():
         msg = subprocess.check_output(['git', 'log', '-1', '--format=%B'], text=True)
         files = [f for f in files_out.strip().split('\n') if f]
         commit_hash = subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip()
-    except subprocess.CalledProcessError:
+    except subprocess.CalledProcessError as e:
+        err_log = klyd_dir / 'errors.log'
+        with open(err_log, 'a') as f:
+            f.write(f"Error running git command: {e}\n")
         return
 
     if not files:
@@ -188,6 +191,7 @@ def extract_commit():
 
             for d in decisions:
                 event = d.get('event_type')
+                d['last_seen_commit'] = commit_hash
                 
                 if event == 'REINFORCE':
                     match = next((e for e in existing if e['module'] == d['module'] and e['decision'] == d['decision']), None)

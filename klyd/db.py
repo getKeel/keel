@@ -15,18 +15,41 @@ def init_db(db_path):
 def store_decision(db_path, decision_dict):
     conn = sqlite3.connect(db_path)
     cur = conn.cursor()
-    cur.execute('''
-        INSERT INTO decisions (decision, module, file_patterns, confidence, event_type)
-        VALUES (?, ?, ?, ?, ?)
-    ''', (
-        decision_dict['decision'],
-        decision_dict['module'],
-        decision_dict['file_patterns'],
-        decision_dict['confidence'],
-        decision_dict.get('event_type', 'NEW')
-    ))
-    conn.commit()
-    decision_id = cur.lastrowid
+    try:
+        cur.execute('''
+            INSERT INTO decisions (decision, module, file_patterns, confidence, event_type)
+            VALUES (?, ?, ?, ?, ?)
+        ''', (
+            decision_dict['decision'],
+            decision_dict['module'],
+            decision_dict['file_patterns'],
+            decision_dict['confidence'],
+            decision_dict.get('event_type', 'NEW')
+        ))
+        conn.commit()
+        decision_id = cur.lastrowid
+    except sqlite3.IntegrityError:
+        # Duplicate decision+module – update existing row
+        cur.execute('''
+            UPDATE decisions
+            SET file_patterns = ?,
+                confidence = ?,
+                event_type = ?,
+                reinforcement_count = reinforcement_count + 1,
+                last_seen_commit = ?
+            WHERE decision = ? AND module = ?
+        ''', (
+            decision_dict['file_patterns'],
+            decision_dict['confidence'],
+            decision_dict.get('event_type', 'NEW'),
+            decision_dict.get('last_seen_commit'),
+            decision_dict['decision'],
+            decision_dict['module']
+        ))
+        conn.commit()
+        cur.execute('SELECT id FROM decisions WHERE decision = ? AND module = ?',
+                    (decision_dict['decision'], decision_dict['module']))
+        decision_id = cur.fetchone()[0]
     conn.close()
     return decision_id
 
@@ -121,4 +144,3 @@ def get_existing_decisions_for_files(file_paths: list[str]) -> list[dict]:
     decisions = get_decisions_for_files(db_path, file_paths, top_k=50)
     high_conf = [d for d in decisions if d['confidence'] == 'HIGH']
     return [{'id': d['id'], 'decision': d['decision']} for d in high_conf[:5]]
-

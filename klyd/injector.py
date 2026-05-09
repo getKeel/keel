@@ -10,8 +10,8 @@ def format_injection(decisions):
         mod = f"[{d['module']}]"
         conf = f"{d['confidence']} confidence"
         count = f"confirmed {d['reinforcement_count']} times"
-        dec = f"{d['decision']}."
-        lines.append(f"{i}. {mod} {dec} ({conf}, {count})")
+        dec = d['decision'].rstrip('.')  # remove trailing period if present
+        lines.append(f"{i}. {mod} {dec}. ({conf}, {count})")
         
     lines.append("\nDo not contradict these decisions unless the user explicitly instructs you to change them.")
     
