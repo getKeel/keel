@@ -1,2 +1,5 @@
 include hooks/*.sh
-include AGENTS.md.txt
+include schema/*.sql
+include AGENTS.md
+include README.md
+include LICENSE

@@ -41,3 +41,6 @@ klyd: a CLI tool that wraps coding agents via git hooks to inject architectural 
 - First commit: use `git show HEAD` not `git diff HEAD~1 HEAD`
 - OpenRouter free tier has limited credits; monitor 402 errors
 - Model names with `/` (e.g., `anthropic/claude-3.5-sonnet`) route through OpenRouter
+
+## Remote
+- GitHub: https://github.com/klyd-studio/klyd-harness

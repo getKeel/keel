@@ -19,3 +19,6 @@ include = ["klyd", "klyd.*"]
 
 [project.scripts]
 kl = "klyd.cli:cli"
+
+[tool.setuptools.package-data]
+klyd = ["py.typed"]

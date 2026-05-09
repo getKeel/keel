@@ -400,4 +400,4 @@ MIT License - see LICENSE file.
 ## Links
 
 - PyPI: https://pypi.org/project/klyd/
-- GitHub: https://github.com/getKlyd/klyd
+- GitHub: https://github.com/klyd-studio/klyd-harness
