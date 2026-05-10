@@ -5,7 +5,10 @@ from .db import (
     get_reinforcement_recency_score,
     _cosine_similarity
 )
-from .config import get_injection_template, get_pinned_decision_ids, get_max_decisions_inject, get_strict_mode
+from .config import get_injection_template, get_pinned_decision_ids, get_max_decisions_inject, get_strict_mode, get_config
+from .logger import setup_logger
+
+logger = setup_logger(__name__)
 
 def _file_pattern_match(file_patterns: str, file_list: list[str]) -> float:
     """Return 1.0 if any file matches any pattern, else 0.0."""
@@ -27,7 +30,18 @@ def _compute_recency_score(db_path: str, decision_id: int) -> float:
     """Return recency score between 0 and 1."""
     return get_reinforcement_recency_score(db_path, decision_id)
 
-def format_injection(decisions, db_path=None, task_description=None, relevance_mode='balanced', top_k=None):
+def format_injection(
+    decisions,
+    db_path=None,
+    task_description=None,
+    relevance_mode='balanced',
+    top_k=None,
+    template=None,
+    min_confidence=None,
+    module_filter=None,
+    pinned_ids=None,
+    preview=False
+):
     """
     Format decisions for injection, optionally scoring by relevance.
     
@@ -37,22 +51,49 @@ def format_injection(decisions, db_path=None, task_description=None, relevance_m
         task_description: optional string describing the current task
         relevance_mode: 'balanced' (default) or 'strict'
         top_k: maximum number of decisions to include (overrides config if provided)
+        template: custom template string with {decisions} placeholder (overrides config)
+        min_confidence: minimum confidence level to include ('LOW', 'MEDIUM', 'HIGH')
+        module_filter: list of module names to include (if provided, only decisions with module in this list)
+        pinned_ids: list of decision ids to always include (overrides config if provided)
+        preview: if True, print the formatted output to console instead of returning
     Returns:
-        formatted string
+        formatted string (if preview=False)
     """
+    logger.debug("Formatting injection", extra={
+        'decision_count': len(decisions),
+        'relevance_mode': relevance_mode,
+        'top_k': top_k,
+        'preview': preview
+    })
     if not decisions:
         return ""
 
     # Use config values if not overridden
     if top_k is None:
         top_k = get_max_decisions_inject()
-    template = get_injection_template()
-    pinned_ids = get_pinned_decision_ids()
+    if template is None:
+        template = get_injection_template()
+    if pinned_ids is None:
+        pinned_ids = get_pinned_decision_ids()
+    if min_confidence is None:
+        min_confidence = get_config('min_confidence', 'LOW')
+    if module_filter is None:
+        module_filter = get_config('module_filter', [])
+    
     strict_mode = get_strict_mode()
 
     # If strict_mode is True, override relevance_mode to 'strict'
     if strict_mode:
         relevance_mode = 'strict'
+
+    # Filter by confidence
+    confidence_order = {'LOW': 0, 'MEDIUM': 1, 'HIGH': 2}
+    min_conf_val = confidence_order.get(min_confidence.upper(), 0)
+    decisions = [d for d in decisions if confidence_order.get(d['confidence'], 0) >= min_conf_val]
+
+    # Filter by module
+    if module_filter:
+        decisions = [d for d in decisions if d['module'] in module_filter]
 
     # Separate pinned decisions from the rest
     pinned = [d for d in decisions if d['id'] in pinned_ids]
@@ -111,4 +152,11 @@ def format_injection(decisions, db_path=None, task_description=None, relevance_m
     decisions_text = "\n".join(decision_lines)
     result = template.replace("{decisions}", decisions_text)
 
+    if preview:
+        from rich.console import Console
+        console = Console()
+        console.print(result)
+        return result
+
+    logger.info("Injection formatted", extra={'decision_count': len(final_decisions)})
     return result

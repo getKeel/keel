@@ -2,6 +2,9 @@ import json
 import urllib.request
 from anthropic import Anthropic
 from .db import get_existing_decisions_for_files, compute_embedding
+from .logger import setup_logger
+
+logger = setup_logger(__name__)
 
 def _call_openai_compatible(url, key, model, prompt):
     data = json.dumps({
@@ -22,6 +25,7 @@ def _call_openai_compatible(url, key, model, prompt):
         return res['choices'][0]['message']['content']
 
 def extract_decisions(diff, commit_message, existing_decisions, config_data, model='claude-sonnet-4-6'):
+    logger.info("Extracting decisions from commit", extra={'model': model})
     files = []
     for line in diff.split('\n'):
         if line.startswith('diff --git a/'):
@@ -83,10 +87,12 @@ Existing architectural invariants (do not violate unless explicitly instructed):
                 messages=[{"role": "user", "content": prompt}]
             )
             content = response.content[0].text.strip()
+            logger.debug("Anthropic API call succeeded")
         # Use OpenRouter for Anthropic models if we have openrouter_key
         elif is_anthropic_model and 'openrouter_key' in config_data:
             url, key = "https://openrouter.ai/api/v1/chat/completions", config_data['openrouter_key']
             content = _call_openai_compatible(url, key, model, prompt)
+            logger.debug("OpenRouter API call succeeded")
         else:
             # OpenAI compatible providers
             if model.startswith('gpt-') or model.startswith('o1') or model.startswith('o3'):
@@ -108,6 +114,7 @@ Existing architectural invariants (do not violate unless explicitly instructed):
                 raise ValueError(f"No valid API key configured for model: {model}")
                 
             content = _call_openai_compatible(url, key, model, prompt)
+            logger.debug("OpenAI-compatible API call succeeded")
             
         # Parse output as JSON
         content = content.strip()
@@ -120,6 +127,7 @@ Existing architectural invariants (do not violate unless explicitly instructed):
         
         result = json.loads(content)
         if not isinstance(result, list):
+            logger.warning("LLM returned non-list result", extra={'result': result})
             return []
         
         normalized = []
@@ -144,8 +152,10 @@ Existing architectural invariants (do not violate unless explicitly instructed):
                 'event_type': event_val,
                 'embedding_bytes': emb_bytes
             })
-            
+        
+        logger.info(f"Extracted {len(normalized)} decisions", extra={'count': len(normalized)})
         return normalized
 
     except Exception as e:
+        logger.error("Extraction failed", extra={'error': str(e)})
         raise

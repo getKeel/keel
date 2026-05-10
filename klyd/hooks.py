@@ -2,6 +2,9 @@ import os
 import shutil
 import stat
 from pathlib import Path
+from .logger import setup_logger
+
+logger = setup_logger(__name__)
 
 def get_template_path(hook_name):
     # Try to find the hooks directory relative to this file
@@ -27,6 +30,7 @@ def install_hooks():
         
         # chmod +x
         dest.chmod(dest.stat().st_mode | stat.S_IEXEC)
+        logger.info(f"Installed hook: {hook}", extra={'src': str(src), 'dest': str(dest)})
 
 def uninstall_hooks():
     git_dir = Path('.git')
@@ -41,3 +45,4 @@ def uninstall_hooks():
             content = dest.read_bytes()
             if b"klyd" in content:
                 dest.unlink()
+                logger.info(f"Uninstalled hook: {hook}", extra={'path': str(dest)})

@@ -4,20 +4,42 @@ import json
 import time
 import hashlib
 from pathlib import Path
+from .logger import setup_logger
+
+logger = setup_logger(__name__)
 
 def get_schema_path():
     return Path(__file__).resolve().parent.parent / 'schema' / 'v1.sql'
 
 def init_db(db_path):
+    logger.info("Initializing database", extra={'db_path': db_path})
     conn = sqlite3.connect(db_path)
     schema = get_schema_path().read_text()
     conn.executescript(schema)
     conn.commit()
     conn.close()
     migrate_db(db_path)  # ensure new columns exist (safe for existing DBs)
+    # Create metrics table if not exists
+    _ensure_metrics_table(db_path)
+    logger.info("Database initialized", extra={'db_path': db_path})
+
+def _ensure_metrics_table(db_path):
+    conn = sqlite3.connect(db_path)
+    cur = conn.cursor()
+    cur.execute('''
+        CREATE TABLE IF NOT EXISTS metrics (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            timestamp TEXT DEFAULT (datetime('now')),
+            metric_name TEXT NOT NULL,
+            metric_value REAL NOT NULL
+        )
+    ''')
+    conn.commit()
+    conn.close()
 
 def migrate_db(db_path):
     """Add new columns if they don't exist (safe migration)."""
+    logger.debug("Running migration", extra={'db_path': db_path})
     conn = sqlite3.connect(db_path)
     cur = conn.cursor()
     # Check existing columns
@@ -40,8 +62,10 @@ def migrate_db(db_path):
         additions.append("ALTER TABLE decisions ADD COLUMN auto_archive_after INTEGER DEFAULT NULL")
     for stmt in additions:
         cur.execute(stmt)
+        logger.debug("Added column", extra={'stmt': stmt})
     conn.commit()
     conn.close()
+    _ensure_metrics_table(db_path)
 
 def _compute_dummy_embedding(text: str) -> bytes:
     """Placeholder: returns a fixed-size byte array (128 zeros) for now.
@@ -54,6 +78,7 @@ def compute_embedding(text: str) -> bytes:
     return _compute_dummy_embedding(text)
 
 def store_decision(db_path, decision_dict):
+    logger.debug("Storing decision", extra={'decision': decision_dict.get('decision', '')[:60]})
     conn = sqlite3.connect(db_path)
     cur = conn.cursor()
     try:
@@ -69,6 +94,7 @@ def store_decision(db_path, decision_dict):
         ))
         conn.commit()
         decision_id = cur.lastrowid
+        logger.info("New decision stored", extra={'decision_id': decision_id})
     except sqlite3.IntegrityError:
         # Duplicate decision+module – update existing row
         cur.execute('''
@@ -92,6 +118,7 @@ def store_decision(db_path, decision_dict):
         cur.execute('SELECT id FROM decisions WHERE decision = ? AND module = ?',
                     (decision_dict['decision'], decision_dict['module']))
         decision_id = cur.fetchone()[0]
+        logger.info("Decision updated (duplicate)", extra={'decision_id': decision_id})
     conn.close()
     return decision_id
 
@@ -100,6 +127,7 @@ def store_decision_with_embedding(db_path, decision_dict, embedding_bytes=None):
     If embedding_bytes is None, compute it from decision text."""
     if embedding_bytes is None:
         embedding_bytes = compute_embedding(decision_dict['decision'])
+    logger.debug("Storing decision with embedding", extra={'decision': decision_dict.get('decision', '')[:60]})
     conn = sqlite3.connect(db_path)
     cur = conn.cursor()
     try:
@@ -116,6 +144,7 @@ def store_decision_with_embedding(db_path, decision_dict, embedding_bytes=None):
         ))
         conn.commit()
         decision_id = cur.lastrowid
+        logger.info("New decision stored with embedding", extra={'decision_id': decision_id})
     except sqlite3.IntegrityError:
         # Duplicate – update embedding and other fields
         cur.execute('''
@@ -141,6 +170,7 @@ def store_decision_with_embedding(db_path, decision_dict, embedding_bytes=None):
         cur.execute('SELECT id FROM decisions WHERE decision = ? AND module = ?',
                     (decision_dict['decision'], decision_dict['module']))
         decision_id = cur.fetchone()[0]
+        logger.info("Decision updated with embedding (duplicate)", extra={'decision_id': decision_id})
     conn.close()
     return decision_id
 
@@ -154,6 +184,7 @@ def _match_any_file(file_patterns, file_list_str):
     return 0
 
 def get_decisions_for_files(db_path, file_list, top_k=5):
+    logger.debug("Getting decisions for files", extra={'file_count': len(file_list), 'top_k': top_k})
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
     conn.create_function("match_files", 2, _match_any_file)
@@ -171,17 +202,18 @@ def get_decisions_for_files(db_path, file_list, top_k=5):
     
     results = [dict(row) for row in cur.fetchall()]
     conn.close()
+    logger.debug("Retrieved decisions", extra={'count': len(results)})
     return results
 
 def get_relevant_decisions(db_path, file_list, task_description=None, top_k=10):
     """Return decisions relevant to the given files and optional task description.
     Uses file pattern matching plus a placeholder for semantic similarity.
     Currently returns same as get_decisions_for_files but with top_k default 10."""
-    # For now, use the existing file-pattern matching.
-    # In future, incorporate embedding similarity with task_description.
+    logger.debug("Getting relevant decisions", extra={'file_count': len(file_list), 'top_k': top_k})
     return get_decisions_for_files(db_path, file_list, top_k=top_k)
 
 def reinforce_decision(db_path, decision_id, commit_hash):
+    logger.info("Reinforcing decision", extra={'decision_id': decision_id, 'commit': commit_hash[:8]})
     conn = sqlite3.connect(db_path)
     conn.execute('''
         UPDATE decisions 
@@ -194,27 +226,32 @@ def reinforce_decision(db_path, decision_id, commit_hash):
     conn.close()
 
 def flag_decision(db_path, decision_id):
+    logger.info("Flagging decision", extra={'decision_id': decision_id})
     conn = sqlite3.connect(db_path)
     conn.execute('UPDATE decisions SET flagged = 1 WHERE id = ?', (decision_id,))
     conn.commit()
     conn.close()
 
 def archive_decision(db_path, decision_id):
+    logger.info("Archiving decision", extra={'decision_id': decision_id})
     conn = sqlite3.connect(db_path)
     conn.execute('UPDATE decisions SET archived = 1 WHERE id = ?', (decision_id,))
     conn.commit()
     conn.close()
 
 def get_flagged_decisions(db_path):
+    logger.debug("Getting flagged decisions")
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
     cur = conn.cursor()
     cur.execute("SELECT * FROM decisions WHERE flagged = 1 AND archived = 0")
     res = [dict(r) for r in cur.fetchall()]
     conn.close()
+    logger.debug("Retrieved flagged decisions", extra={'count': len(res)})
     return res
 
 def get_active_decisions_by_module(db_path, module):
+    logger.debug("Getting active decisions by module", extra={'module': module})
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
     cur = conn.cursor()
@@ -224,6 +261,7 @@ def get_active_decisions_by_module(db_path, module):
     return res
 
 def resolve_decision(db_path, decision_id, action, old_id=None, new_text=None):
+    logger.info("Resolving decision", extra={'decision_id': decision_id, 'action': action})
     conn = sqlite3.connect(db_path)
     if action == 'accept':
         if old_id:
@@ -273,7 +311,6 @@ def create_decision_version(db_path: str, original_id: int, new_decision_dict: d
         raise ValueError(f"Decision with id {original_id} not found")
     
     new_version = original['version_id'] + 1
-    # Build the new dict, overriding fields from new_decision_dict
     new_dict = {
         'decision': new_decision_dict.get('decision', original['decision']),
         'module': new_decision_dict.get('module', original['module']),
@@ -305,6 +342,7 @@ def create_decision_version(db_path: str, original_id: int, new_decision_dict: d
     conn.commit()
     new_id = cur.lastrowid
     conn.close()
+    logger.info("Created decision version", extra={'original_id': original_id, 'new_id': new_id, 'version': new_version})
     return new_id
 
 def merge_decisions(db_path: str, keep_id: int, archive_id: int):
@@ -320,6 +358,7 @@ def merge_decisions(db_path: str, keep_id: int, archive_id: int):
     ''', (keep_id, archive_id))
     conn.commit()
     conn.close()
+    logger.info("Merged decisions", extra={'keep_id': keep_id, 'archive_id': archive_id})
 
 def auto_archive_old_decisions(db_path: str):
     """
@@ -327,7 +366,6 @@ def auto_archive_old_decisions(db_path: str):
     """
     conn = sqlite3.connect(db_path)
     cur = conn.cursor()
-    # Archive decisions where auto_archive_after is not null and created_at is older than now - auto_archive_after days
     cur.execute('''
         UPDATE decisions
         SET archived = 1
@@ -337,6 +375,7 @@ def auto_archive_old_decisions(db_path: str):
     ''')
     conn.commit()
     conn.close()
+    logger.info("Auto-archived old decisions")
 
 def get_decision_versions(db_path: str, decision_id: int) -> list[dict]:
     """
@@ -346,7 +385,6 @@ def get_decision_versions(db_path: str, decision_id: int) -> list[dict]:
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
     cur = conn.cursor()
-    # First get the root (the one with no parent)
     cur.execute('''
         WITH RECURSIVE ancestors(id, parent_decision_id, version_id, decision, module, file_patterns, confidence, event_type, reinforcement_count, last_seen_commit, created_at, flagged, archived, embedding, last_reinforced_at, relevance_score, merged_into_id, auto_archive_after) AS (
             SELECT id, parent_decision_id, version_id, decision, module, file_patterns, confidence, event_type, reinforcement_count, last_seen_commit, created_at, flagged, archived, embedding, last_reinforced_at, relevance_score, merged_into_id, auto_archive_after
@@ -385,3 +423,80 @@ def get_decision_ancestry(db_path: str, decision_id: int) -> list[dict]:
     results = [dict(row) for row in cur.fetchall()]
     conn.close()
     return results
+
+# ----------------------------------------------------------------------
+# Metrics helpers
+# ----------------------------------------------------------------------
+
+def record_metric(db_path: str, metric_name: str, metric_value: float):
+    """Record a metric value in the metrics table."""
+    conn = sqlite3.connect(db_path)
+    cur = conn.cursor()
+    cur.execute('''
+        INSERT INTO metrics (metric_name, metric_value)
+        VALUES (?, ?)
+    ''', (metric_name, metric_value))
+    conn.commit()
+    conn.close()
+    logger.debug("Recorded metric", extra={'metric_name': metric_name, 'metric_value': metric_value})
+
+def get_metrics_summary(db_path: str) -> dict:
+    """Return a summary of the latest metrics."""
+    conn = sqlite3.connect(db_path)
+    cur = conn.cursor()
+    # Get latest decision_count
+    cur.execute('''
+        SELECT metric_value FROM metrics
+        WHERE metric_name = 'decision_count'
+        ORDER BY timestamp DESC LIMIT 1
+    ''')
+    row = cur.fetchone()
+    decision_count = row[0] if row else 0
+
+    # Get latest avg_confidence
+    cur.execute('''
+        SELECT metric_value FROM metrics
+        WHERE metric_name = 'avg_confidence'
+        ORDER BY timestamp DESC LIMIT 1
+    ''')
+    row = cur.fetchone()
+    avg_confidence = row[0] if row else 0.0
+
+    # Get latest conflict_rate
+    cur.execute('''
+        SELECT metric_value FROM metrics
+        WHERE metric_name = 'conflict_rate'
+        ORDER BY timestamp DESC LIMIT 1
+    ''')
+    row = cur.fetchone()
+    conflict_rate = row[0] if row else 0.0
+
+    conn.close()
+    return {
+        'decision_count': decision_count,
+        'avg_confidence': avg_confidence,
+        'conflict_rate': conflict_rate
+    }
+
+def update_metrics(db_path: str):
+    """Compute and record current metrics from the decisions table."""
+    conn = sqlite3.connect(db_path)
+    cur = conn.cursor()
+    # Total active decisions
+    cur.execute("SELECT COUNT(*) FROM decisions WHERE archived = 0")
+    total = cur.fetchone()[0]
+    # Average confidence (map to numeric)
+    cur.execute("SELECT confidence FROM decisions WHERE archived = 0")
+    confs = [row[0] for row in cur.fetchall()]
+    conf_map = {'LOW': 0, 'MEDIUM': 1, 'HIGH': 2}
+    avg_conf = sum(conf_map.get(c, 0) for c in confs) / len(confs) if confs else 0.0
+    # Conflict rate
+    cur.execute("SELECT COUNT(*) FROM decisions WHERE archived = 0 AND flagged = 1")
+    flagged = cur.fetchone()[0]
+    conflict_rate = flagged / total if total > 0 else 0.0
+    conn.close()
+
+    record_metric(db_path, 'decision_count', total)
+    record_metric(db_path, 'avg_confidence', avg_conf)
+    record_metric(db_path, 'conflict_rate', conflict_rate)
+    logger.info("Metrics updated", extra={'decision_count': total, 'avg_confidence': avg_conf, 'conflict_rate': conflict_rate})

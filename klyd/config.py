@@ -1,5 +1,8 @@
 import json
 from pathlib import Path
+from .logger import setup_logger
+
+logger = setup_logger(__name__)
 
 DEFAULT_INJECTION_TEMPLATE = """[klyd] Architectural decisions governing files in this session:
 
@@ -27,6 +30,7 @@ def init_config():
         }
         with open(config_path, 'w') as f:
             json.dump(default, f, indent=2)
+        logger.info("Initialized config file", extra={'path': str(config_path)})
 
 def set_config(key, value):
     init_config()
@@ -36,6 +40,7 @@ def set_config(key, value):
     data[key] = value
     with open(config_path, 'w') as f:
         json.dump(data, f, indent=2)
+    logger.debug("Set config key", extra={'key': key})
 
 def get_config(key, default=None):
     config_path = get_config_path()

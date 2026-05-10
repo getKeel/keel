@@ -5,7 +5,8 @@ import traceback
 import urllib.request
 from .hooks import install_hooks
 from .config import init_config, set_config, get_config, get_all_config, get_injection_template, set_injection_template, get_strict_mode, set_strict_mode, get_pinned_decision_ids, add_pinned_decision_id, remove_pinned_decision_id, clear_pinned_decision_ids, get_max_decisions_inject, set_max_decisions_inject, get_min_confidence, set_min_confidence, get_module_filter, set_module_filter
-from .db import get_schema_path, migrate_db, get_decision_by_id, create_decision_version, merge_decisions, auto_archive_old_decisions
+from .db import get_schema_path, migrate_db, get_decision_by_id, create_decision_version, merge_decisions, auto_archive_old_decisions, update_metrics, get_metrics_summary
+from .logger import setup_logger
 import sqlite3
 from pathlib import Path
 from rich.console import Console
@@ -21,6 +22,7 @@ import rich.box
 import io
 import datetime
 
+logger = setup_logger(__name__)
 console = Console()
 
 class KlydGroup(click.Group):
@@ -146,7 +148,6 @@ def _format_diff(old_text: str, new_text: str) -> str:
 def _compute_stats(active, flagged):
     total = len(active) + len(flagged)
     conflict_rate = len(flagged) / total if total > 0 else 0.0
-    # drift_score: average of (1 - recency) for active decisions? For simplicity, use conflict_rate
     drift_score = conflict_rate
     return {
         'total': total,
@@ -242,6 +243,7 @@ def _export_status(active, flagged, stats, format_type):
 @cli.command()
 def init():
     """Initialize klyd in the current git repository."""
+    logger.info("Initializing klyd")
     console.print()
     console.print(r"[green bold]888  /         888           Y88b    /       888~-_   [/green bold]")
     console.print(r"[green bold]888 /          888            Y88b  /        888   \  [/green bold]")
@@ -263,12 +265,15 @@ def init():
             init_db(str(db_path))
             # Migration is called inside init_db, but call again for safety
             migrate_db(str(db_path))
+            # Record initial metrics
+            update_metrics(str(db_path))
             
         console.print(Panel(
             "Klyd harness initialised in [cyan].klyd[/cyan]\n\n[dim]Installed git hooks for automatic extraction.[/dim]\n[dim]Errors are logged to .klyd/errors.log[/dim]",
             title="[bold green]SUCCESS[/bold green]", border_style="green", padding=(1, 2)
         ))
     except Exception as e:
+        logger.error("Initialization failed", extra={'error': str(e)})
         console.print(f"[red]Error: {e}[/red]")
         raise click.Abort()
 
@@ -340,6 +345,7 @@ def config(api_key, openai_key, openrouter_key, gemini_key, groq_key, model, sho
             changes = True
             
     if changes:
+        logger.info("Configuration saved")
         console.print(Panel("[bold green]Configuration saved successfully[/bold green]", title="[bold green]DONE[/bold green]", border_style="green", expand=False))
     else:
         console.print("[yellow]Usage:[/yellow] kl config --api-key ... --openai-key ... --model ... --injection-template ... --strict-mode ... --max-decisions ... --min-confidence ... --module-filter ...\nOr use --show to display current configuration.")
@@ -387,7 +393,7 @@ def run(no_inject, relevance_mode, cmd):
 def extract_commit():
     """Extract decisions from the last commit."""
     from .extractor import extract_decisions
-    from .db import get_decisions_for_files, store_decision_with_embedding, reinforce_decision, flag_decision
+    from .db import get_decisions_for_files, store_decision_with_embedding, reinforce_decision, flag_decision, update_metrics
     
     klyd_dir = Path('.klyd')
     if not (klyd_dir / 'memory.db').exists():
@@ -443,6 +449,9 @@ def extract_commit():
                 else:
                     store_decision_with_embedding(db_path, d, embedding_bytes=emb_bytes)
                     new_count += 1
+            
+            # Update metrics after extraction
+            update_metrics(db_path)
                     
         if new_count > 0 or reinforced_count > 0:
             console.print(Panel(
@@ -582,6 +591,7 @@ def pin(decision_id):
         return
     
     add_pinned_decision_id(decision_id)
+    logger.info("Pinned decision", extra={'decision_id': decision_id})
     console.print(Panel(
         f"[bold green]Pinned decision {decision_id}:[/bold green] {decision['decision'][:60]}...",
         border_style="green", expand=False
@@ -593,15 +603,17 @@ def unpin(decision_id):
     """Unpin a decision. If no id given, unpin all."""
     if decision_id is None:
         clear_pinned_decision_ids()
+        logger.info("Unpinned all decisions")
         console.print("[bold yellow]All decisions unpinned.[/bold yellow]")
     else:
         remove_pinned_decision_id(decision_id)
+        logger.info("Unpinned decision", extra={'decision_id': decision_id})
         console.print(f"[bold yellow]Unpinned decision {decision_id}.[/bold yellow]")
 
 @cli.command()
 def review():
     """Review flagged conflicting decisions with enhanced conflict resolution."""
-    from .db import get_flagged_decisions, get_active_decisions_by_module, resolve_decision
+    from .db import get_flagged_decisions, get_active_decisions_by_module, resolve_decision, update_metrics
     
     klyd_dir = Path('.klyd')
     db_path = klyd_dir / 'memory.db'
@@ -703,6 +715,8 @@ def review():
                         merge_decisions(db_str, new_version_id, old_id)
                         # Archive the new conflicting decision
                         merge_decisions(db_str, new_version_id, d['id'])
+                        # Update metrics
+                        update_metrics(db_str)
                         console.print(Panel(
                             "[bold green]Merged decision created. Old and conflicting decisions archived.[/bold green]",
                             border_style="green", expand=False
@@ -719,6 +733,7 @@ def review():
                 if old_id:
                     merge_decisions(db_str, d['id'], old_id)
                 resolve_decision(db_str, d['id'], 'accept', old_id=old_id)
+                update_metrics(db_str)
                 console.print(Panel(
                     "[bold yellow]Old decision archived. New decision accepted.[/bold yellow]",
                     border_style="yellow", expand=False
@@ -729,6 +744,7 @@ def review():
                 if new_text is not None:
                     new_text = new_text.strip()
                     resolve_decision(db_str, d['id'], 'edit', old_id=old_id, new_text=new_text)
+                    update_metrics(db_str)
                     console.print(Panel(
                         "[bold blue]Saved edited decision. Memory updated.[/bold blue]",
                         border_style="blue", expand=False
@@ -738,6 +754,7 @@ def review():
                     console.print("[red]Edit cancelled. Please choose an option.[/red]")
             elif choice == 'r':
                 resolve_decision(db_str, d['id'], 'reject')
+                update_metrics(db_str)
                 console.print(Panel(
                     "[bold red]Rejected new decision. Existing memory preserved.[/bold red]",
                     border_style="red", expand=False
@@ -750,6 +767,7 @@ def review():
                     if old_decision and old_decision['confidence'] == 'LOW':
                         merge_decisions(db_str, d['id'], old_id)
                         resolve_decision(db_str, d['id'], 'accept', old_id=old_id)
+                        update_metrics(db_str)
                         console.print(Panel(
                             "[bold magenta]Old decision (LOW confidence) archived. New decision accepted.[/bold magenta]",
                             border_style="magenta", expand=False
@@ -894,3 +912,26 @@ def status(search, tree, format_type, stats):
 
     console.print()
     console.print(f"[dim]Summary:[/dim] [cyan]{len(active)} active[/cyan] | [red]{len(flagged)} pending review[/red]")
+
+@cli.command()
+def metrics():
+    """Show a simple text summary of tracked metrics."""
+    klyd_dir = Path('.klyd')
+    db_path = klyd_dir / 'memory.db'
+    if not db_path.exists():
+        console.print("[bold red]klyd is not initialized. Run `kl init`.[/bold red]")
+        return
+
+    # Update metrics first
+    update_metrics(str(db_path))
+    summary = get_metrics_summary(str(db_path))
+
+    panel = Panel(
+        f"[bold]Decision count:[/bold] {summary['decision_count']}\n"
+        f"[bold]Average confidence:[/bold] {summary['avg_confidence']:.2f} (0=LOW, 1=MEDIUM, 2=HIGH)\n"
+        f"[bold]Conflict rate:[/bold] {summary['conflict_rate']:.2%}",
+        title="[bold cyan]klyd Metrics[/bold cyan]",
+        border_style="cyan",
+        expand=False
+    )
+    console.print(panel)
