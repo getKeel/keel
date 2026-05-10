@@ -5,6 +5,7 @@ from .db import (
     get_reinforcement_recency_score,
     _cosine_similarity
 )
+from .config import get_injection_template, get_pinned_decision_ids, get_max_decisions_inject, get_strict_mode
 
 def _file_pattern_match(file_patterns: str, file_list: list[str]) -> float:
     """Return 1.0 if any file matches any pattern, else 0.0."""
@@ -26,7 +27,7 @@ def _compute_recency_score(db_path: str, decision_id: int) -> float:
     """Return recency score between 0 and 1."""
     return get_reinforcement_recency_score(db_path, decision_id)
 
-def format_injection(decisions, db_path=None, task_description=None, relevance_mode='balanced', top_k=10):
+def format_injection(decisions, db_path=None, task_description=None, relevance_mode='balanced', top_k=None):
     """
     Format decisions for injection, optionally scoring by relevance.
     
@@ -35,28 +36,37 @@ def format_injection(decisions, db_path=None, task_description=None, relevance_m
         db_path: path to the memory.db (needed for embedding retrieval)
         task_description: optional string describing the current task
         relevance_mode: 'balanced' (default) or 'strict'
-        top_k: maximum number of decisions to include
+        top_k: maximum number of decisions to include (overrides config if provided)
     Returns:
         formatted string
     """
     if not decisions:
         return ""
 
+    # Use config values if not overridden
+    if top_k is None:
+        top_k = get_max_decisions_inject()
+    template = get_injection_template()
+    pinned_ids = get_pinned_decision_ids()
+    strict_mode = get_strict_mode()
+
+    # If strict_mode is True, override relevance_mode to 'strict'
+    if strict_mode:
+        relevance_mode = 'strict'
+
+    # Separate pinned decisions from the rest
+    pinned = [d for d in decisions if d['id'] in pinned_ids]
+    unpinned = [d for d in decisions if d['id'] not in pinned_ids]
+
     # If task_description is provided, compute its embedding once
     task_embedding = None
     if task_description and db_path:
         task_embedding = compute_embedding(task_description)
 
-    # Compute scores for each decision
+    # Compute scores for unpinned decisions
     scored = []
-    for d in decisions:
-        file_match = _file_pattern_match(d['file_patterns'], [])  # file_list not available here; will be passed separately
-        # We'll get file_list from the caller later; for now we need to pass it.
-        # Actually, the decisions already come from get_decisions_for_files which already filtered by file patterns.
-        # So file_match is 1 for all decisions in this list.
-        # But we still compute it for completeness.
-        # We'll set file_match to 1 because the decisions are already filtered.
-        file_match = 1.0  # because they were selected by file pattern matching
+    for d in unpinned:
+        file_match = 1.0  # decisions already filtered by file patterns
 
         semantic_sim = 0.0
         if task_embedding and db_path:
@@ -78,23 +88,27 @@ def format_injection(decisions, db_path=None, task_description=None, relevance_m
     # Sort by score descending
     scored.sort(key=lambda x: x[0], reverse=True)
 
-    # Take top_k
-    top_decisions = [d for _, d in scored[:top_k]]
+    # Take top_k from unpinned (after pinned)
+    remaining_slots = max(0, top_k - len(pinned))
+    top_unpinned = [d for _, d in scored[:remaining_slots]]
 
-    if not top_decisions:
+    # Combine pinned (always included) with top unpinned
+    final_decisions = pinned + top_unpinned
+
+    if not final_decisions:
         return ""
 
-    lines = [
-        "[klyd] Architectural decisions governing files in this session:\n"
-    ]
-    
-    for i, d in enumerate(top_decisions, 1):
+    # Build the decision lines
+    decision_lines = []
+    for i, d in enumerate(final_decisions, 1):
         mod = f"[{d['module']}]"
         conf = f"{d['confidence']} confidence"
         count = f"confirmed {d['reinforcement_count']} times"
         dec = d['decision'].rstrip('.')  # remove trailing period if present
-        lines.append(f"{i}. {mod} {dec}. ({conf}, {count})")
-        
-    lines.append("\nDo not contradict these decisions unless the user explicitly instructs you to change them.")
-    
-    return "\n".join(lines)
+        decision_lines.append(f"{i}. {mod} {dec}. ({conf}, {count})")
+
+    # Format using the template
+    decisions_text = "\n".join(decision_lines)
+    result = template.replace("{decisions}", decisions_text)
+
+    return result

@@ -4,7 +4,7 @@ import json
 import traceback
 import urllib.request
 from .hooks import install_hooks
-from .config import init_config, set_config, get_config, get_all_config
+from .config import init_config, set_config, get_config, get_all_config, get_injection_template, set_injection_template, get_strict_mode, set_strict_mode, get_pinned_decision_ids, add_pinned_decision_id, remove_pinned_decision_id, clear_pinned_decision_ids, get_max_decisions_inject, set_max_decisions_inject
 from .db import get_schema_path, migrate_db, get_decision_by_id, create_decision_version, merge_decisions, auto_archive_old_decisions
 import sqlite3
 from pathlib import Path
@@ -180,7 +180,10 @@ def init():
 @click.option('--groq-key', help='Groq API key')
 @click.option('--model', help='Model to use (default: claude-sonnet-4-6)')
 @click.option('--show', is_flag=True, help='Show current configuration')
-def config(api_key, openai_key, openrouter_key, gemini_key, groq_key, model, show):
+@click.option('--injection-template', help='Custom injection template with {decisions} placeholder')
+@click.option('--strict-mode', type=bool, help='Enable strict mode (only file-matched decisions)')
+@click.option('--max-decisions', type=int, help='Maximum number of decisions to inject')
+def config(api_key, openai_key, openrouter_key, gemini_key, groq_key, model, show, injection_template, strict_mode, max_decisions):
     """Set klyd configuration."""
     if show:
         cfg = get_all_config()
@@ -217,11 +220,20 @@ def config(api_key, openai_key, openrouter_key, gemini_key, groq_key, model, sho
         if model:
             set_config('model', model)
             changes = True
+        if injection_template is not None:
+            set_injection_template(injection_template)
+            changes = True
+        if strict_mode is not None:
+            set_strict_mode(strict_mode)
+            changes = True
+        if max_decisions is not None:
+            set_max_decisions_inject(max_decisions)
+            changes = True
             
     if changes:
         console.print(Panel("[bold green]Configuration saved successfully[/bold green]", title="[bold green]DONE[/bold green]", border_style="green", expand=False))
     else:
-        console.print("[yellow]Usage:[/yellow] kl config --api-key ... --openai-key ... --model ...\nOr use --show to display current configuration.")
+        console.print("[yellow]Usage:[/yellow] kl config --api-key ... --openai-key ... --model ... --injection-template ... --strict-mode ... --max-decisions ...\nOr use --show to display current configuration.")
 
 @cli.command(context_settings={"ignore_unknown_options": True})
 @click.option('--no-inject', is_flag=True, help='Skip generating injection file')
@@ -373,7 +385,7 @@ def prepare_injection(relevance_mode):
                 db_path=db_path,
                 task_description=task_description,
                 relevance_mode=relevance_mode,
-                top_k=10
+                top_k=None  # will use config default
             )
             with open(klyd_dir / 'injection.txt', 'w') as f:
                 f.write(injection)
@@ -384,6 +396,84 @@ def prepare_injection(relevance_mode):
         with open(klyd_dir / 'errors.log', 'a') as f:
             f.write(f"Error preparing injection:\n{traceback.format_exc()}\n")
         return
+
+@cli.command()
+@click.option('--relevance-mode', type=click.Choice(['balanced', 'strict']), default='balanced', help='Relevance scoring mode')
+def preview_injection(relevance_mode):
+    """Preview the injection file without writing it."""
+    from .db import get_decisions_for_files
+    from .injector import format_injection
+    
+    klyd_dir = Path('.klyd')
+    if not (klyd_dir / 'memory.db').exists():
+        console.print("[bold red]klyd is not initialized. Run `kl init`.[/bold red]")
+        return
+        
+    try:
+        with console.status("[bold cyan]Generating preview...[/bold cyan]", spinner="dots12"):
+            files_out = subprocess.check_output(['git', 'diff', '--cached', '--name-only'], text=True)
+            files = [f for f in files_out.strip().split('\n') if f]
+            
+            if not files:
+                console.print("[yellow]No staged files. Injection would be empty.[/yellow]")
+                return
+                
+            db_path = str(klyd_dir / 'memory.db')
+            decisions = get_decisions_for_files(db_path, files, top_k=20)
+            
+            task_description = None
+            
+            injection = format_injection(
+                decisions,
+                db_path=db_path,
+                task_description=task_description,
+                relevance_mode=relevance_mode,
+                top_k=None
+            )
+            
+        console.print(Panel(
+            injection,
+            title="[bold cyan]Injection Preview[/bold cyan]",
+            border_style="cyan",
+            expand=False
+        ))
+            
+    except Exception as e:
+        console.print(f"[red]Error generating preview: {e}[/red]")
+        return
+
+@cli.command()
+@click.argument('decision_id', type=int)
+def pin(decision_id):
+    """Pin a decision so it always appears in injection."""
+    from .db import get_decision_by_id
+    klyd_dir = Path('.klyd')
+    db_path = klyd_dir / 'memory.db'
+    if not db_path.exists():
+        console.print("[bold red]klyd is not initialized. Run `kl init`.[/bold red]")
+        return
+    
+    decision = get_decision_by_id(str(db_path), decision_id)
+    if not decision:
+        console.print(f"[red]Decision with id {decision_id} not found.[/red]")
+        return
+    
+    add_pinned_decision_id(decision_id)
+    console.print(Panel(
+        f"[bold green]Pinned decision {decision_id}:[/bold green] {decision['decision'][:60]}...",
+        border_style="green", expand=False
+    ))
+
+@cli.command()
+@click.argument('decision_id', type=int, required=False)
+def unpin(decision_id):
+    """Unpin a decision. If no id given, unpin all."""
+    if decision_id is None:
+        clear_pinned_decision_ids()
+        console.print("[bold yellow]All decisions unpinned.[/bold yellow]")
+    else:
+        remove_pinned_decision_id(decision_id)
+        console.print(f"[bold yellow]Unpinned decision {decision_id}.[/bold yellow]")
 
 @cli.command()
 def review():
@@ -579,6 +669,8 @@ def status():
     table.add_column("Event")
     table.add_column("Reinforcements", justify="right")
 
+    pinned_ids = get_pinned_decision_ids()
+
     for d in active:
         conf_color = "bold bright_green" if d['confidence'] == 'HIGH' else ("bold bright_yellow" if d['confidence'] == 'MEDIUM' else "dim white")
         conf_styled = f"[{conf_color}]{d['confidence']}[/{conf_color}]"
@@ -586,8 +678,12 @@ def status():
         event_color = "bright_blue" if d.get('event_type') == 'NEW' else ("bright_magenta" if d.get('event_type') == 'REINFORCE' else "bold bright_red")
         event_styled = f"[{event_color}]{d.get('event_type', 'NEW')}[/{event_color}]"
         
+        id_str = str(d['id'])
+        if d['id'] in pinned_ids:
+            id_str = f"[bold yellow]📌 {id_str}[/bold yellow]"
+        
         table.add_row(
-            str(d['id'])[:8],
+            id_str,
             d['decision'],
             d['module'],
             conf_styled,
