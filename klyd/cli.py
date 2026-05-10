@@ -117,8 +117,9 @@ def config(api_key, openai_key, openrouter_key, gemini_key, groq_key, model, sho
 
 @cli.command(context_settings={"ignore_unknown_options": True})
 @click.option('--no-inject', is_flag=True, help='Skip generating injection file')
+@click.option('--relevance-mode', type=click.Choice(['balanced', 'strict']), default='balanced', help='Relevance scoring mode')
 @click.argument('cmd', nargs=-1, type=click.UNPROCESSED)
-def run(no_inject, cmd):
+def run(no_inject, relevance_mode, cmd):
     """Run an agent with injected architectural memory."""
     if not cmd:
         console.print("Usage: kl run <agent> [args...]")
@@ -131,7 +132,8 @@ def run(no_inject, cmd):
         with console.status("[bold cyan]Preparing injection context...[/bold cyan]", spinner="dots12"):
             try:
                 ctx = click.get_current_context()
-                ctx.invoke(prepare_injection)
+                # Pass relevance_mode to prepare_injection
+                ctx.invoke(prepare_injection, relevance_mode=relevance_mode)
             except Exception as e:
                 pass
             
@@ -231,7 +233,8 @@ def extract_commit():
         return
 
 @cli.command()
-def prepare_injection():
+@click.option('--relevance-mode', type=click.Choice(['balanced', 'strict']), default='balanced', help='Relevance scoring mode')
+def prepare_injection(relevance_mode):
     """Prepare injection file for agent sessions."""
     from .db import get_decisions_for_files
     from .injector import format_injection
@@ -253,7 +256,17 @@ def prepare_injection():
             db_path = str(klyd_dir / 'memory.db')
             decisions = get_decisions_for_files(db_path, files, top_k=20)
             
-            injection = format_injection(decisions)
+            # Get task description from git commit message? For now, use None.
+            # In future, could be passed via --message flag.
+            task_description = None
+            
+            injection = format_injection(
+                decisions,
+                db_path=db_path,
+                task_description=task_description,
+                relevance_mode=relevance_mode,
+                top_k=10
+            )
             with open(klyd_dir / 'injection.txt', 'w') as f:
                 f.write(injection)
                 
