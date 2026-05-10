@@ -30,6 +30,14 @@ def migrate_db(db_path):
         additions.append("ALTER TABLE decisions ADD COLUMN last_reinforced_at TEXT DEFAULT NULL")
     if 'relevance_score' not in existing:
         additions.append("ALTER TABLE decisions ADD COLUMN relevance_score REAL DEFAULT 0.0")
+    if 'version_id' not in existing:
+        additions.append("ALTER TABLE decisions ADD COLUMN version_id INTEGER DEFAULT 1")
+    if 'parent_decision_id' not in existing:
+        additions.append("ALTER TABLE decisions ADD COLUMN parent_decision_id INTEGER DEFAULT NULL")
+    if 'merged_into_id' not in existing:
+        additions.append("ALTER TABLE decisions ADD COLUMN merged_into_id INTEGER DEFAULT NULL")
+    if 'auto_archive_after' not in existing:
+        additions.append("ALTER TABLE decisions ADD COLUMN auto_archive_after INTEGER DEFAULT NULL")
     for stmt in additions:
         cur.execute(stmt)
     conn.commit()
@@ -237,3 +245,143 @@ def get_existing_decisions_for_files(file_paths: list[str]) -> list[dict]:
     decisions = get_decisions_for_files(db_path, file_paths, top_k=50)
     high_conf = [d for d in decisions if d['confidence'] == 'HIGH']
     return [{'id': d['id'], 'decision': d['decision']} for d in high_conf[:5]]
+
+# ----------------------------------------------------------------------
+# Conflict resolution helpers
+# ----------------------------------------------------------------------
+
+def get_decision_by_id(db_path: str, decision_id: int) -> dict | None:
+    """Retrieve a single decision by its id."""
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    cur = conn.cursor()
+    cur.execute("SELECT * FROM decisions WHERE id = ?", (decision_id,))
+    row = cur.fetchone()
+    conn.close()
+    if row:
+        return dict(row)
+    return None
+
+def create_decision_version(db_path: str, original_id: int, new_decision_dict: dict) -> int:
+    """
+    Create a new version of a decision, linking it to the original via parent_decision_id.
+    The new decision gets version_id = original.version_id + 1.
+    Returns the id of the new decision.
+    """
+    original = get_decision_by_id(db_path, original_id)
+    if not original:
+        raise ValueError(f"Decision with id {original_id} not found")
+    
+    new_version = original['version_id'] + 1
+    # Build the new dict, overriding fields from new_decision_dict
+    new_dict = {
+        'decision': new_decision_dict.get('decision', original['decision']),
+        'module': new_decision_dict.get('module', original['module']),
+        'file_patterns': new_decision_dict.get('file_patterns', original['file_patterns']),
+        'confidence': new_decision_dict.get('confidence', original['confidence']),
+        'event_type': new_decision_dict.get('event_type', 'NEW'),
+        'last_seen_commit': new_decision_dict.get('last_seen_commit', original.get('last_seen_commit')),
+        'embedding': new_decision_dict.get('embedding', original.get('embedding')),
+    }
+    
+    conn = sqlite3.connect(db_path)
+    cur = conn.cursor()
+    cur.execute('''
+        INSERT INTO decisions
+            (decision, module, file_patterns, confidence, event_type,
+             last_seen_commit, embedding, version_id, parent_decision_id)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ''', (
+        new_dict['decision'],
+        new_dict['module'],
+        new_dict['file_patterns'],
+        new_dict['confidence'],
+        new_dict['event_type'],
+        new_dict.get('last_seen_commit'),
+        new_dict.get('embedding'),
+        new_version,
+        original_id
+    ))
+    conn.commit()
+    new_id = cur.lastrowid
+    conn.close()
+    return new_id
+
+def merge_decisions(db_path: str, keep_id: int, archive_id: int):
+    """
+    Merge two decisions: archive the one with archive_id and set its merged_into_id to keep_id.
+    """
+    conn = sqlite3.connect(db_path)
+    cur = conn.cursor()
+    cur.execute('''
+        UPDATE decisions
+        SET archived = 1, merged_into_id = ?
+        WHERE id = ?
+    ''', (keep_id, archive_id))
+    conn.commit()
+    conn.close()
+
+def auto_archive_old_decisions(db_path: str):
+    """
+    Archive decisions that have auto_archive_after set and are older than that many days.
+    """
+    conn = sqlite3.connect(db_path)
+    cur = conn.cursor()
+    # Archive decisions where auto_archive_after is not null and created_at is older than now - auto_archive_after days
+    cur.execute('''
+        UPDATE decisions
+        SET archived = 1
+        WHERE archived = 0
+          AND auto_archive_after IS NOT NULL
+          AND datetime(created_at, '+' || auto_archive_after || ' days') < datetime('now')
+    ''')
+    conn.commit()
+    conn.close()
+
+def get_decision_versions(db_path: str, decision_id: int) -> list[dict]:
+    """
+    Return all versions of a decision, following the parent chain.
+    Returns a list ordered by version_id ascending.
+    """
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    cur = conn.cursor()
+    # First get the root (the one with no parent)
+    cur.execute('''
+        WITH RECURSIVE ancestors(id, parent_decision_id, version_id, decision, module, file_patterns, confidence, event_type, reinforcement_count, last_seen_commit, created_at, flagged, archived, embedding, last_reinforced_at, relevance_score, merged_into_id, auto_archive_after) AS (
+            SELECT id, parent_decision_id, version_id, decision, module, file_patterns, confidence, event_type, reinforcement_count, last_seen_commit, created_at, flagged, archived, embedding, last_reinforced_at, relevance_score, merged_into_id, auto_archive_after
+            FROM decisions
+            WHERE id = ?
+            UNION ALL
+            SELECT d.id, d.parent_decision_id, d.version_id, d.decision, d.module, d.file_patterns, d.confidence, d.event_type, d.reinforcement_count, d.last_seen_commit, d.created_at, d.flagged, d.archived, d.embedding, d.last_reinforced_at, d.relevance_score, d.merged_into_id, d.auto_archive_after
+            FROM decisions d
+            INNER JOIN ancestors a ON d.id = a.parent_decision_id
+        )
+        SELECT * FROM ancestors ORDER BY version_id ASC
+    ''', (decision_id,))
+    results = [dict(row) for row in cur.fetchall()]
+    conn.close()
+    return results
+
+def get_decision_ancestry(db_path: str, decision_id: int) -> list[dict]:
+    """
+    Return the chain of ancestors (parents) for a given decision, starting from the root.
+    """
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    cur = conn.cursor()
+    cur.execute('''
+        WITH RECURSIVE ancestors(id, parent_decision_id, version_id, decision, module, file_patterns, confidence, event_type, reinforcement_count, last_seen_commit, created_at, flagged, archived, embedding, last_reinforced_at, relevance_score, merged_into_id, auto_archive_after) AS (
+            SELECT id, parent_decision_id, version_id, decision, module, file_patterns, confidence, event_type, reinforcement_count, last_seen_commit, created_at, flagged, archived, embedding, last_reinforced_at, relevance_score, merged_into_id, auto_archive_after
+            FROM decisions
+            WHERE id = ?
+            UNION ALL
+            SELECT d.id, d.parent_decision_id, d.version_id, d.decision, d.module, d.file_patterns, d.confidence, d.event_type, d.reinforcement_count, d.last_seen_commit, d.created_at, d.flagged, d.archived, d.embedding, d.last_reinforced_at, d.relevance_score, d.merged_into_id, d.auto_archive_after
+            FROM decisions d
+            INNER JOIN ancestors a ON d.id = a.parent_decision_id
+        )
+        SELECT * FROM ancestors ORDER BY version_id ASC
+    ''', (decision_id,))
+    results = [dict(row) for row in cur.fetchall()]
+    conn.close()
+    return results
